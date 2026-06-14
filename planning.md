@@ -77,7 +77,7 @@ The tool first tries same-category listings with overlapping style tags, excludi
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
-1. Create a new session and parse the user query into `description`, `size`, and `max_price`. Store these values in `session["parsed"]`; if size or price is not mentioned, store `None` for that value.
+1. Create a new session and parse the user query with deterministic regular expressions: extract phrases such as `size M` and `under $30`, then remove those filter phrases from the remaining search description. Store `description`, `size`, and `max_price` in `session["parsed"]`; if size or price is not mentioned, store `None` for that value.
 2. Call `search_listings` with the parsed values and store its return value in `session["search_results"]`. If the list is empty, set `session["error"]` to a helpful no-results message and return the session immediately.
 3. If results exist, set `session["selected_item"] = session["search_results"][0]`. The first result is used because search results are already sorted by relevance.
 4. Call `compare_price` with `session["selected_item"]` and store the returned dictionary in `session["price_comparison"]`. If its verdict is `"unknown"`, keep the explanation and continue because a price comparison is not required to create an outfit.
@@ -101,12 +101,12 @@ Every tool result is saved before the next call so the final response can combin
 | Tool | Failure mode | Agent response |
 |------|--------------|----------------|
 | `search_listings` | No matches | Stop and say: `"I couldn't find a vintage graphic tee under $30. Try a higher budget or a broader search like 'graphic top'."` If size was given, offer to remove it. |
-| `compare_price` | Too few close matches | Compare with other items in the same category and tell the user the estimate is broader. |
-| `compare_price` | No usable prices | Return `"unknown"` and say: `"I can't compare this price, but I can still help style the item."` |
-| `suggest_outfit` | Empty wardrobe | Give general advice, such as loose jeans, chunky sneakers, and a simple bag, without claiming the user owns them. |
-| `suggest_outfit` | LLM fails or returns blank text | Use a basic suggestion based on the item's category, colors, and style tags. |
-| `create_fit_card` | Missing outfit or listing details | Say: `"I couldn't create the fit card because some outfit or listing details are missing."` Show the other valid results. |
-| `create_fit_card` | LLM fails or returns blank text | Build a simple two-sentence caption from the title, price, platform, and outfit. |
+| `compare_price` | Fewer than two close matches | Use all other valid listings in the same category and label the result as a broader same-category comparison. |
+| `compare_price` | Invalid price, no comparables, or data-loading failure | Return `"unknown"` with: `"I can't compare this price, but I can still help style the item."` Continue to outfit creation. |
+| `suggest_outfit` | Empty or invalid wardrobe | Ask the LLM for general category, color, and style advice without claiming the user owns those pieces. |
+| `suggest_outfit` | LLM/API fails or returns blank text | Return a non-empty rule-based suggestion using the item's category, colors, and style tags. |
+| `create_fit_card` | Empty outfit or missing/invalid listing details | Return a clear message naming the missing or invalid input. Keep any valid listing, price, and outfit results already created. |
+| `create_fit_card` | LLM/API fails or returns blank text | Return a basic caption built from the title, price, platform, and outfit. |
 
 ---
 
@@ -126,16 +126,22 @@ flowchart TD
 
     P -->|If results exist: selected_item = results 0| S
     P -->|selected_item| CP[Tool 4: compare_price]
-    CP -->|Price statistics, verdict, and explanation| P
+    CP -->|2 or more close matches: price result| P
     P -->|Save price_comparison| S
+    CP -.->|Too few matches or unusable data| CPF[Broader comparison or unknown result]
+    CPF --> P
 
     P -->|selected_item and wardrobe| SO[Tool 2: suggest_outfit]
-    SO -->|Outfit suggestion or general styling advice| P
+    SO -->|Named outfit suggestion| P
     P -->|Save outfit_suggestion| S
+    SO -.->|Empty wardrobe or LLM failure| SOF[General or rule-based suggestion]
+    SOF --> P
 
     P -->|outfit_suggestion and selected_item| FC[Tool 3: create_fit_card]
-    FC -->|Shareable outfit caption| P
+    FC -->|Shareable caption| P
     P -->|Save fit_card| S
+    FC -.->|Missing input or LLM failure| FCF[Error message or basic caption]
+    FCF --> P
 
     P -->|Listing, price verdict, outfit, and fit card| U
 ```

@@ -10,9 +10,14 @@ Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
     create_fit_card(outfit, new_item)               → str
+    compare_price(item)                              → dict
 """
 
+import json
+import math
 import os
+import re
+import statistics
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -69,8 +74,41 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    keywords = re.findall(r"\b\w+\b", description.lower())
+
+    if not keywords:
+        return []
+
+    requested_size = size.strip().lower() if size is not None else None
+    scored_listings = []
+
+    for listing in listings:
+        if max_price is not None and listing["price"] > max_price:
+            continue
+
+        listing_size = listing["size"].lower()
+        if requested_size is not None and requested_size not in listing_size:
+            continue
+
+        searchable_text = " ".join(
+            [
+                listing["title"],
+                listing["description"],
+                listing["category"],
+                *listing["style_tags"],
+            ]
+        ).lower()
+
+        score = sum(
+            len(re.findall(rf"\b{re.escape(keyword)}\b", searchable_text))
+            for keyword in keywords
+        )
+        if score > 0:
+            scored_listings.append((score, listing))
+
+    scored_listings.sort(key=lambda result: result[0], reverse=True)
+    return [listing for _, listing in scored_listings]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +138,231 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item = new_item if isinstance(new_item, dict) else {}
+    wardrobe_items = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
+    if not isinstance(wardrobe_items, list):
+        wardrobe_items = []
+
+    title = item.get("title") or "this item"
+    category = item.get("category") or "item"
+    colors = item.get("colors") or ["neutral"]
+    style_tags = item.get("style_tags") or ["versatile"]
+
+    pairing_by_category = {
+        "tops": "relaxed jeans or trousers, neutral shoes, and a simple accessory",
+        "bottoms": "a fitted or simple top, a light layer, and neutral shoes",
+        "outerwear": "a basic top, straight-leg bottoms, and simple shoes",
+        "shoes": "simple bottoms, a coordinated top, and one matching accessory",
+        "accessories": "a simple top, relaxed bottoms, and shoes in a matching tone",
+    }
+    general_pairing = pairing_by_category.get(
+        str(category).lower(),
+        "simple neutral basics and one coordinating accessory",
+    )
+    fallback = (
+        f"Style {title} with {general_pairing}. "
+        f"Its {', '.join(map(str, colors))} colors and "
+        f"{', '.join(map(str, style_tags))} style will keep the outfit coordinated."
+    )
+
+    if wardrobe_items:
+        wardrobe_instruction = (
+            "Suggest one or two complete outfits using only pieces named in the "
+            "wardrobe below. Do not invent clothing the user owns. If the wardrobe "
+            "is too limited for a complete outfit, use the available pieces and "
+            "clearly recommend the missing item categories."
+        )
+    else:
+        wardrobe_instruction = (
+            "The user's wardrobe is empty. Give one or two general outfit ideas "
+            "using item categories, colors, and styles. Do not claim the user owns "
+            "any of the suggested pieces."
+        )
+
+    prompt = (
+        f"{wardrobe_instruction}\n\n"
+        f"New item:\n{json.dumps(item, indent=2)}\n\n"
+        f"Wardrobe items:\n{json.dumps(wardrobe_items, indent=2)}\n\n"
+        "Identify the new item in each outfit, name any wardrobe pieces exactly as "
+        "provided, and briefly explain the color or style coordination. Return only "
+        "the outfit suggestion in a concise, natural tone."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are FitFindr, a practical personal stylist who creates "
+                        "specific outfits without inventing wardrobe items."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.6,
+            max_tokens=400,
+        )
+        suggestion = response.choices[0].message.content
+        if suggestion and suggestion.strip():
+            return suggestion.strip()
+    except Exception:
+        pass
+
+    return fallback
+
+
+# Tool 4: compare_price
+
+def compare_price(item: dict) -> dict:
+    """
+    Compare an item's price with similar listings in the dataset.
+
+    Similar listings share the same category and at least one style tag.
+    Brand and condition are used as extra similarity signals. If fewer than
+    two close matches exist, all other listings in the category are used.
+
+    Returns:
+        A dictionary with item_price, comparable_count, average_price,
+        median_price, price_difference, verdict, and explanation.
+        Invalid input or no usable comparables returns an "unknown" verdict.
+    """
+    unknown_result = {
+        "item_price": 0.0,
+        "comparable_count": 0,
+        "average_price": 0.0,
+        "median_price": 0.0,
+        "price_difference": 0.0,
+        "verdict": "unknown",
+        "explanation": (
+            "I can't compare this price, but I can still help style the item."
+        ),
+    }
+
+    if not isinstance(item, dict):
+        return unknown_result
+
+    item_price = item.get("price")
+    if (
+        isinstance(item_price, bool)
+        or not isinstance(item_price, (int, float))
+        or not math.isfinite(item_price)
+        or item_price < 0
+    ):
+        return unknown_result
+
+    item_price = float(item_price)
+    unknown_result["item_price"] = item_price
+
+    category = item.get("category")
+    if not isinstance(category, str) or not category.strip():
+        return unknown_result
+
+    item_id = item.get("id")
+    item_tags = {
+        str(tag).strip().lower()
+        for tag in (item.get("style_tags") or [])
+        if str(tag).strip()
+    }
+    item_brand = item.get("brand")
+    item_condition = item.get("condition")
+
+    try:
+        listings = load_listings()
+    except Exception:
+        return unknown_result
+
+    same_category = []
+    close_matches = []
+
+    for listing in listings:
+        if not isinstance(listing, dict):
+            continue
+        if item_id is not None and listing.get("id") == item_id:
+            continue
+        if str(listing.get("category", "")).lower() != category.lower():
+            continue
+
+        price = listing.get("price")
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or not math.isfinite(price)
+            or price < 0
+        ):
+            continue
+
+        same_category.append(listing)
+        listing_tags = {
+            str(tag).strip().lower()
+            for tag in (listing.get("style_tags") or [])
+            if str(tag).strip()
+        }
+        if item_tags.intersection(listing_tags):
+            close_matches.append(listing)
+
+    used_broad_fallback = len(close_matches) < 2
+    comparables = same_category if used_broad_fallback else close_matches
+    if not comparables:
+        return unknown_result
+
+    def similarity_score(listing: dict) -> tuple[int, int]:
+        brand_match = int(
+            item_brand is not None
+            and listing.get("brand") is not None
+            and str(listing["brand"]).lower() == str(item_brand).lower()
+        )
+        condition_match = int(
+            item_condition is not None
+            and str(listing.get("condition", "")).lower()
+            == str(item_condition).lower()
+        )
+        return brand_match, condition_match
+
+    comparables.sort(key=similarity_score, reverse=True)
+    prices = [float(listing["price"]) for listing in comparables]
+    average_price = round(statistics.fmean(prices), 2)
+    median_price = round(statistics.median(prices), 2)
+    price_difference = round(item_price - median_price, 2)
+
+    if median_price == 0:
+        verdict = "fair" if item_price == 0 else "overpriced"
+    elif item_price <= median_price * 0.9:
+        verdict = "good deal"
+    elif item_price <= median_price * 1.1:
+        verdict = "fair"
+    else:
+        verdict = "overpriced"
+
+    comparison_type = (
+        "broader same-category listings"
+        if used_broad_fallback
+        else "similar listings"
+    )
+    if price_difference == 0:
+        comparison_text = f"equal to the ${median_price:.2f} median"
+    else:
+        difference_position = "below" if price_difference < 0 else "above"
+        comparison_text = (
+            f"${abs(price_difference):.2f} {difference_position} "
+            f"the ${median_price:.2f} median"
+        )
+    explanation = (
+        f"The ${item_price:.2f} price is {comparison_text} of "
+        f"{len(comparables)} {comparison_type}, so it is {verdict}."
+    )
+
+    return {
+        "item_price": item_price,
+        "comparable_count": len(comparables),
+        "average_price": average_price,
+        "median_price": median_price,
+        "price_difference": price_difference,
+        "verdict": verdict,
+        "explanation": explanation,
+    }
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +394,90 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not isinstance(outfit, str) or not outfit.strip():
+        return "I couldn't create the fit card because the outfit suggestion is missing."
+
+    if not isinstance(new_item, dict):
+        return "I couldn't create the fit card because the listing details are missing."
+
+    required_fields = ("title", "price", "platform")
+    missing_fields = [
+        field
+        for field in required_fields
+        if field not in new_item
+        or new_item[field] is None
+        or (
+            isinstance(new_item[field], str)
+            and not new_item[field].strip()
+        )
+    ]
+    if missing_fields:
+        return (
+            "I couldn't create the fit card because the listing is missing: "
+            f"{', '.join(missing_fields)}."
+        )
+
+    title = str(new_item["title"]).strip()
+    price = new_item["price"]
+    platform = str(new_item["platform"]).strip()
+    if (
+        isinstance(price, bool)
+        or not isinstance(price, (int, float))
+        or not math.isfinite(price)
+        or price < 0
+    ):
+        return "I couldn't create the fit card because the listing price is invalid."
+
+    style_tags = new_item.get("style_tags") or []
+    colors = new_item.get("colors") or []
+    clean_outfit = outfit.strip()
+    formatted_price = f"${price:g}"
+
+    prompt = (
+        "Write a casual outfit-of-the-day caption using the information below.\n\n"
+        f"Item name: {title}\n"
+        f"Price: {formatted_price}\n"
+        f"Platform: {platform}\n"
+        f"Colors: {', '.join(map(str, colors)) or 'not provided'}\n"
+        f"Style tags: {', '.join(map(str, style_tags)) or 'not provided'}\n"
+        f"Outfit: {clean_outfit}\n\n"
+        "Requirements:\n"
+        "- Write two to four sentences.\n"
+        "- Sound casual and authentic, not like a product listing.\n"
+        "- Mention the exact item name, price, and platform once each.\n"
+        "- Describe the outfit's specific vibe or color coordination.\n"
+        "- Return only the caption."
+    )
+
+    outfit_sentence = clean_outfit
+    if clean_outfit[-1] not in ".!?":
+        outfit_sentence += "."
+    fallback = (
+        f"Found the {title} for {formatted_price} on {platform}. "
+        f"{outfit_sentence} The result is an easy, put-together look."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You write short, natural social media captions for "
+                        "secondhand outfit finds."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.9,
+            max_tokens=220,
+        )
+        caption = response.choices[0].message.content
+        if caption and caption.strip():
+            return caption.strip()
+    except Exception:
+        pass
+
+    return fallback

@@ -43,8 +43,48 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    if not isinstance(user_query, str) or not user_query.strip():
+        return "Please enter a description of the item you want to find.", "", ""
+
+    if wardrobe_choice == "Example wardrobe":
+        wardrobe = get_example_wardrobe()
+    else:
+        wardrobe = get_empty_wardrobe()
+
+    session = run_agent(user_query.strip(), wardrobe)
+    if session["error"]:
+        return session["error"], "", ""
+
+    item = session["selected_item"]
+    price_comparison = session.get("price_comparison") or {}
+    style_tags = ", ".join(map(str, item.get("style_tags") or [])) or "Not listed"
+    colors = ", ".join(map(str, item.get("colors") or [])) or "Not listed"
+    brand = item.get("brand") or "Unbranded"
+
+    listing_lines = [
+        item.get("title", "Untitled listing"),
+        f"Price: ${item['price']:g}",
+        f"Platform: {item.get('platform', 'Unknown')}",
+        f"Size: {item.get('size', 'Not listed')}",
+        f"Condition: {item.get('condition', 'Not listed')}",
+        f"Brand: {brand}",
+        f"Colors: {colors}",
+        f"Style: {style_tags}",
+    ]
+
+    if price_comparison:
+        verdict = str(price_comparison.get("verdict", "unknown")).title()
+        listing_lines.append(f"Price check: {verdict}")
+        explanation = price_comparison.get("explanation")
+        if explanation:
+            listing_lines.append(str(explanation))
+
+    listing_text = "\n".join(listing_lines)
+    return (
+        listing_text,
+        session["outfit_suggestion"],
+        session["fit_card"],
+    )
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
