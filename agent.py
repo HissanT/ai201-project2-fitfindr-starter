@@ -61,13 +61,16 @@ def _parse_query(query: str) -> dict:
 
     price_match = re.search(
         r"\b(?:under|below|up\s+to|less\s+than|max(?:imum)?"
-        r"(?:\s+price)?(?:\s+of)?)\s*\$?\s*(\d+(?:\.\d{1,2})?)\b",
+        r"(?:\s+price)?(?:\s+of)?)\s*\$?\s*(\d+(?:\.\d{1,2})?)"
+        r"(?:\s*(?:dollars?|bucks?))?\b",
         clean_query,
         flags=re.IGNORECASE,
     )
     if price_match is None:
         price_match = re.search(
-            r"\$(\d+(?:\.\d{1,2})?)\s*(?:or\s+less|max(?:imum)?)?\b",
+            r"\$(\d+(?:\.\d{1,2})?)"
+            r"(?:\s*(?:dollars?|bucks?))?"
+            r"\s*(?:or\s+less|max(?:imum)?)?\b",
             clean_query,
             flags=re.IGNORECASE,
         )
@@ -80,8 +83,11 @@ def _parse_query(query: str) -> dict:
         description = description.replace(price_match.group(0), " ")
 
     description = re.sub(
-        r"^\s*(?:i(?:'m|\s+am)?\s+)?(?:looking|searching)\s+for\s+"
-        r"(?:(?:a|an|the)\s+)?",
+        r"^\s*(?:"
+        r"(?:i(?:'m|\s+am)?\s+)?(?:looking|searching)\s+for"
+        r"|i\s+(?:want|need)(?:\s+to\s+wear)?"
+        r"|i(?:'d|\s+would)\s+like(?:\s+to\s+wear)?"
+        r")\s+(?:(?:a|an|the)\s+)?",
         "",
         description,
         flags=re.IGNORECASE,
@@ -92,6 +98,13 @@ def _parse_query(query: str) -> dict:
         description,
         flags=re.IGNORECASE,
     )
+    description = re.sub(
+        r"^\s*to\s+(?:wear|buy|find)\s+",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\s+\bfor\b\s*$", "", description, flags=re.IGNORECASE)
     description = re.sub(r"\s+", " ", description).strip(" ,.-")
 
     return {

@@ -24,6 +24,26 @@ def test_parse_query_extracts_description_size_and_price():
     }
 
 
+def test_parse_query_removes_conversational_filler_and_currency_words():
+    parsed = agent._parse_query("I want an underwear for under 30 dollars")
+
+    assert parsed == {
+        "description": "underwear",
+        "size": None,
+        "max_price": 30.0,
+    }
+
+
+def test_parse_query_removes_wear_request_filler():
+    parsed = agent._parse_query("I want to wear leaves for under 30 dollars")
+
+    assert parsed == {
+        "description": "leaves",
+        "size": None,
+        "max_price": 30.0,
+    }
+
+
 def test_run_agent_stores_results_and_calls_tools_in_order(monkeypatch):
     calls = []
     wardrobe = {"items": [{"name": "Baggy jeans"}]}
